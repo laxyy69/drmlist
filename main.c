@@ -10,28 +10,6 @@
 #include <dirent.h>
 #include <linux/limits.h>
 
-struct mydrm_buf 
-{
-    uint32_t width;
-    uint32_t height;
-    uint32_t stride;
-    uint32_t size;
-    uint32_t handle;
-    uint8_t* map;
-    uint32_t fb;
-};
-
-struct mydrm_data 
-{
-    int fd;
-    struct mydrm_buf framebuffer[2];
-    uint32_t crt_id;
-    bool pflip_pending;
-    bool cleanup;
-    int front_buf;
-    uint32_t width;
-    uint32_t height;
-};
 
 struct mouse_pos_info 
 {
@@ -41,7 +19,7 @@ struct mouse_pos_info
     int max_y;
 };
 
-int cursor_size = 20;
+static int cursor_size = 32;
 uint32_t bg_color = 0xFF111111;
                    /* AARRGGBB */
 uint32_t cursor_color = 0xFF0000FF;
@@ -105,84 +83,40 @@ const char* mydrm_connector_typename (uint32_t connector_type)
 	}
 }
 
-
-bool create_framebuffer(int fd, struct mydrm_buf* buf)
+static void draw_box(uint32_t* pixels, struct mydrm_data* data, uint32_t color)
 {
-    struct drm_mode_create_dumb creq;
-    struct drm_mode_create_dumb dreq;
-    struct drm_mode_map_dumb mreq;
+    static bool go_right = true;
+    static size_t start_x = 0;
+    const size_t box_width = 50;
+    const size_t box_height = data->height;
+    const size_t speed = 5;
+    const size_t start_y = 0; 
 
-    memset(&creq, 0, sizeof(creq));
-    creq.width = buf->width;
-    creq.height = buf->height;
-    creq.bpp = 32;
+    if (go_right)
+        start_x += speed;
+    else
+        start_x -= speed;
 
-    int ret = mydrm_ioctl(fd, DRM_IOCTL_MODE_CREATE_DUMB, &creq);
+    if (start_x + box_width >= data->width || start_x <= 0)
+        go_right = !go_right;
 
-    if (ret < 0)
+    for (size_t x = 0; x < box_width; x++)
     {
-        perror("ioctl failed to create the buffer");
+        for (size_t y = 0; y < box_height; y++)
+        {
+            size_t pos = (x + start_x) + ((y + start_y) * data->width);
 
-        return false;
+            pixels[pos] = color;
+        }
     }
-
-    buf->stride = creq.pitch;
-    buf->size = creq.size;
-    buf->handle = creq.handle;
-
-    struct drm_mode_fb_cmd fbcmd;
-    memset(&fbcmd, 0, sizeof(fbcmd));
-    fbcmd.width = buf->width;
-    fbcmd.height = buf->height;
-    fbcmd.depth = 24;
-    fbcmd.bpp = 32;
-    fbcmd.pitch = buf->stride;
-    fbcmd.handle = buf->handle;
-
-    ret = mydrm_ioctl(fd, DRM_IOCTL_MODE_ADDFB, &fbcmd);
-
-    if (ret < 0)
-    {
-        perror("ioctl failed to add fb");
-        return false;
-    }
-
-    buf->fb = fbcmd.fb_id;
-    memset(&mreq, 0, sizeof(mreq));
-    mreq.handle = buf->handle;
-
-    ret = mydrm_ioctl(fd, DRM_IOCTL_MODE_MAP_DUMB, &mreq); 
-
-    if (ret < 0)
-    {
-        perror("ioctl failed to map");
-        return false;
-    }
-
-    buf->map = mmap(0, buf->size, PROT_READ | PROT_WRITE, MAP_SHARED, fd, mreq.offset);
-
-    if (buf->map == MAP_FAILED)
-    {
-        perror("mmap: failed to map fb");
-        return false;
-    }
-
-    memset(buf->map, 0, buf->size);
-
-    return true;
 }
 
-static void draw_data(int fd, struct mydrm_data* data)
+void draw_cursor(uint32_t* p, struct mydrm_buf* buf, struct mydrm_data* data)
 {
-    struct mydrm_buf* buf = &data->framebuffer[data->front_buf ^ 1];
-
     int start_x = mouse_pos.x;
     int start_y = mouse_pos.y;
 
-    uint32_t* p = (uint32_t*)buf->map;
-
-    memset(p, bg_color, buf->size);
-
+    // draw cursor
     for (int x = 0; x < cursor_size; x++)
     {
         for (int y = 0; y < cursor_size; y++)
@@ -195,7 +129,7 @@ static void draw_data(int fd, struct mydrm_data* data)
             uint32_t color = cursor_color;
 
             if (left_down)
-                color |= 0x00FF0000;
+                color |= 0xFFFF0000;
             
             if (right_down)
                 color |= 0x0000FF00;
@@ -203,6 +137,43 @@ static void draw_data(int fd, struct mydrm_data* data)
             p[pos] = color;
         }
     }
+}
+
+void draw_hardware_cursor(struct mydrm_data* data)
+{
+    /*
+    // Change cursor color 
+    uint32_t hwcursor_color = cursor_color;
+    uint32_t* hwcursor_pixels = (uint32_t*)data->hw_cursor.map;
+
+    if (left_down)
+        hwcursor_color |= 0xFFFF0000;
+    
+    if (right_down)
+        hwcursor_color |= 0x0000FF00;
+    
+    for (size_t i = 0; i < data->hw_cursor.size / sizeof(uint32_t); i++)
+        if (hwcursor_pixels[i] & 0xFF000000)
+            hwcursor_pixels[i] = hwcursor_color;
+    */
+
+    if (mydrm_move_cursor(data->fd, data->crt_id, mouse_pos.x, mouse_pos.y) == -1)
+        perror("move cursor");
+}
+
+static void draw_data(int fd, struct mydrm_data* data)
+{
+    struct mydrm_buf* buf = &data->framebuffer[data->front_buf ^ 1];
+
+    // `p` for pixels 
+    uint32_t* p = (uint32_t*)buf->map;
+
+    memset(p, bg_color, buf->size);
+
+    // position: x + (y * width)
+    draw_box(p, data, 0xFFFFFF00);
+    draw_hardware_cursor(data);
+    // draw_cursor(p, buf, data);
 
     struct drm_mode_crtc_page_flip flip;
     flip.fb_id = buf->fb;
@@ -233,7 +204,7 @@ static void page_flip_event(int fd, uint32_t frame, uint32_t sec, uint32_t usec,
         draw_data(fd, dev);
 }
 
-int set_mode(struct mydrm_data* data, struct drm_mode_get_connector* conn, struct drm_mode_modeinfo* mode)
+int set_mode(struct mydrm_data* data, struct drm_mode_get_connector* conn, struct drm_mode_modeinfo* mode, struct drm_mode_card_res* res)
 {
     bool running = true;
     int nfds = 0;
@@ -246,19 +217,29 @@ int set_mode(struct mydrm_data* data, struct drm_mode_get_connector* conn, struc
     struct epoll_event event;
     struct epoll_event events[3];
 
-    if (!conn->encoder_id)
-    {
-        fprintf(stderr, "No encorder found!\n");
-        ret = -1;
-        goto drop_master;
-    }
+    ret = mydrm_get_encorder(data->fd, conn->encoder_id, &enc);
 
-    if (mydrm_get_encorder(data->fd, conn->encoder_id, &enc))
+    if ((enc.encoder_id != conn->encoder_id && enc.crtc_id == 0) || ret == -1)
     {
-        fprintf(stderr, "Encorer load failed!\n");
-        ret = -1;
+        for (size_t i = 0; i < conn->count_encoders; i++)
+        {
+            ret = mydrm_get_encorder(data->fd, ((uint32_t*)conn->encoders_ptr)[i], &enc);
+
+            if (ret == -1)
+                continue;
+
+            for (size_t j = 0; j < res->count_crtcs; j++)
+            {
+                if (enc.possible_crtcs & (1 << j))
+                {
+                    enc.crtc_id = ((uint32_t*)res->crtc_id_ptr)[j];
+                    goto encoder_found;
+                }
+            }
+        }
         goto drop_master;
     }
+encoder_found:
 
     if (!enc.crtc_id)
     {
@@ -273,28 +254,33 @@ int set_mode(struct mydrm_data* data, struct drm_mode_get_connector* conn, struc
     data->framebuffer[1].width = mode->hdisplay;
     data->framebuffer[1].height = mode->vdisplay;
 
-    mouse_pos.x = 0;
-    mouse_pos.y = 0;
+    mouse_pos.x = (mode->hdisplay / 2) - cursor_size;
+    mouse_pos.y = (mode->vdisplay / 2) - cursor_size;
 
-    if (!create_framebuffer(data->fd, &data->framebuffer[0]))
+    if (!mydrm_create_framebuffer(data->fd, &data->framebuffer[0]))
     {
         fprintf(stderr, "Failed to create framebuffer 1!\n");
         ret = -1;
         goto drop_master;
     }
 
-    if (!create_framebuffer(data->fd, &data->framebuffer[1]))
+    if (!mydrm_create_framebuffer(data->fd, &data->framebuffer[1]))
     {
         fprintf(stderr, "Failed to create framebuffer 2!\n");
         ret = -1;
         goto drop_master;
     }
 
-    printf("Buffer created with size: %d\n", data->framebuffer[0].size);
+    printf("Buffer created with size: %d bytes\n", data->framebuffer[0].size);
 
     memset(&crtc, 0, sizeof(crtc));
     crtc.crtc_id = enc.crtc_id;
     data->crt_id = enc.crtc_id;
+
+    ret = mydrm_setup_hardware_cursor(data);
+    
+    if (ret != -1)
+        printf("Hardware Cursor:\n\tW/H: %dx%d\n\bo_handle: %d\n", data->hw_cursor.width, data->hw_cursor.height, data->hw_cursor.handle);
 
     ret = mydrm_ioctl(data->fd, DRM_IOCTL_MODE_GETCRTC, &crtc);
 
@@ -328,10 +314,10 @@ int set_mode(struct mydrm_data* data, struct drm_mode_get_connector* conn, struc
     mouse_fd = ret;
     
     printf("mouse fd: %d\n", mouse_fd);
-    printf("CRTC res: %d/%d...\n", crtc.mode.hdisplay, crtc.mode.vdisplay);
+    printf("CRTC res: %d/%d @ %d Hz...\n", crtc.mode.hdisplay, crtc.mode.vdisplay, crtc.mode.vrefresh);
     mouse_pos.max_x = crtc.mode.hdisplay;
     mouse_pos.max_y = crtc.mode.vdisplay;
-    
+
     // set mode...
     ret = mydrm_ioctl(data->fd, DRM_IOCTL_MODE_SETCRTC, &crtc);
 
@@ -340,6 +326,7 @@ int set_mode(struct mydrm_data* data, struct drm_mode_get_connector* conn, struc
         perror("ioctl: Failed to set CRTC");
         goto unmap_fb;
     }
+
 
     draw_data(data->fd, data);
 
@@ -440,11 +427,6 @@ unmap_fb:
         perror("munmap framebuffer[1]");
 
 drop_master:
-    if (ioctl(data->fd, DRM_IOCTL_DROP_MASTER, 0) == -1)
-        perror("ioctl DRM_IOCTL_DROP_MASTER");
-
-    if (data->fd && (close(data->fd) == -1))
-        perror("close data->fd");
     if (mouse_fd && (close(mouse_fd) == -1))
         perror("close mouse_fd");
     if (epfd && (close(epfd) == -1))
@@ -481,7 +463,7 @@ void print_drm_info(int fd)
     if (ioctl(fd, DRM_IOCTL_VERSION, version) == -1)
         perror("ioctl DRM_IOCTL_VERSION(2)");
     
-    printf("Name: %s\nDesc: %s\nDate: %s\n", version->name, version->desc, version->date);
+    printf("\tName: %s\n\tDesc: %s\n\tDate: %s\n\n", version->name, version->desc, version->date);
 
     free(version->name);
     free(version->desc);
@@ -492,13 +474,17 @@ void print_drm_info(int fd)
 
 int main(int argc, const char** argv)
 {
-    printf("DRM Modes:\n");
+    printf("drmlist v0.1\n");
+    char* drm_path = getenv("DRMLIST_PATH");
+    if (!drm_path)
+        drm_path = "/dev/dri/card0"; // default path
 
-    int fd = mydrm_open("/dev/dri/card0");
+
+    int fd = mydrm_open(drm_path);
     if (fd == -1)
         return fd;
 
-    printf("drm_fd: %d\n", fd);
+    printf("%s (fd: %d):\n", drm_path, fd);
     print_drm_info(fd);
     
     struct drm_mode_card_res res;
@@ -509,15 +495,22 @@ int main(int argc, const char** argv)
         return -1;
     }
 
-    int hres = 0;
-    int vres = 0;
+    const char* conn_str = NULL;
+    int hres = -1;
+    int vres = -1;
+    int ret = 0;
+    bool is_master = false;
 
-    if (argc == 3)
+    if (argc == 4)
     {
-        hres = atoi(argv[1]);
-        vres = atoi(argv[2]);
+        conn_str = argv[1];
+        hres = atoi(argv[2]);
+        vres = atoi(argv[3]);
 
-        printf("Attemping to set res: %dx%d\n", hres, vres);
+        if (ioctl(fd, DRM_IOCTL_SET_MASTER, 0) == -1)
+            perror("ioctl DRM_IOCTL_SET_MASTER");
+        else
+            is_master = true;
     }
 
     struct mydrm_data data = {
@@ -529,9 +522,6 @@ int main(int argc, const char** argv)
         .fd = fd
     };
 
-    if (ioctl(fd, DRM_IOCTL_SET_MASTER, 0) == -1)
-        perror("ioctl DRM_IOCTL_SET_MASTER");
-
     printf("DRM Connectors: %d\n", res.count_connectors);
 
     for (int i = 0; i < res.count_connectors; i++)
@@ -539,7 +529,7 @@ int main(int argc, const char** argv)
         uint32_t* connectors = (uint32_t*)res.connector_id_ptr;
 
         struct drm_mode_get_connector conn;
-        int ret = mydrm_get_connector(fd, connectors[i], &conn);
+        ret = mydrm_get_connector(fd, connectors[i], &conn);
 
         if (ret) 
         {
@@ -547,37 +537,48 @@ int main(int argc, const char** argv)
             continue;
         }
 
-        printf("Found connector: %s: %d - %d. Modes %d\n",
-                            mydrm_connector_typename(conn.connector_type), i, connectors[i], conn.count_modes);
+        const char* conn_type = mydrm_connector_typename(conn.connector_type);
+
+        printf("Connector %d: %s -- ID: %d, Modes: %d, Encoder COUNT/ID: %d/%d\n",
+                            i, conn_type, connectors[i], conn.count_modes, conn.count_encoders, conn.encoder_id);
 
         if (conn.connection != DRM_MODE_CONNECTED)
         {
             if (conn.connection == DRM_MODE_DISCONNECTED)
             {
-                printf("\tDisconnected. (%d)\n", conn.connection);
+                printf("\tDisconnected. (connection: %d)\n", conn.connection);
             }
             else
             {
-                printf("\tUnknown. (%d)\n", conn.connection);
+                printf("\tUnknown. (connection: %d)\n", conn.connection);
             }
-            continue;
+            goto free_mem;
         }
 
         struct drm_mode_modeinfo* modes = (struct drm_mode_modeinfo*)conn.modes_ptr;
 
         for (int m = 0; m < conn.count_modes; m++)
         {
-            printf("\tMode: %dx%d\n", modes[m].hdisplay, modes[m].vdisplay);
+            printf("\t%dx%d @ %dHz\n", modes[m].hdisplay, modes[m].vdisplay, modes[m].vrefresh);
 
-            if (hres == modes[m].hdisplay && vres == modes[m].vdisplay)
+            if (conn_str && !strcmp(conn_str, conn_type) && hres == modes[m].hdisplay && vres == modes[m].vdisplay)
             {
-                return set_mode(&data, &conn, &modes[m]);
+                printf(">> Attemping to set res: %dx%d on %s\n", hres, vres, conn_type);
+                ret = set_mode(&data, &conn, &modes[m], &res);
+                goto drop_master;
             }
         }
+
+    free_mem:
+        free((void*)conn.props_ptr);
     }
 
-    if (ioctl(fd, DRM_IOCTL_DROP_MASTER, 0) == -1)
+drop_master:
+    if (is_master && ioctl(fd, DRM_IOCTL_DROP_MASTER, 0) == -1)
         perror("ioctl drop master");
+    
+    if (close(fd) == -1)
+        perror("close");
 
-    return 0;
+    return ret;
 }
