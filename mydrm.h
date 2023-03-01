@@ -64,6 +64,10 @@ int mydrm_handle_event(int fd, struct mydrm_event_context* ctx);
 
 bool mydrm_create_framebuffer(int fd, struct mydrm_buf* buf);
 
+// Free functions
+void mydrm_free_connector(struct drm_mode_get_connector* conn);
+void mydrm_free_res(struct drm_mode_card_res* res);
+
 // Hardware cursor
 int mydrm_setup_hardware_cursor(struct mydrm_data* data);
 int mydrm_set_cursor(int fd, uint32_t crtc_id, uint32_t bo_handle, uint32_t width, uint32_t height);

@@ -176,7 +176,6 @@ int mydrm_handle_event(int fd, struct mydrm_event_context* ctx)
 bool mydrm_create_framebuffer(int fd, struct mydrm_buf* buf)
 {
     struct drm_mode_create_dumb creq;
-    struct drm_mode_create_dumb dreq;
     struct drm_mode_map_dumb mreq;
 
     memset(&creq, 0, sizeof(creq));
@@ -196,6 +195,8 @@ bool mydrm_create_framebuffer(int fd, struct mydrm_buf* buf)
     buf->stride = creq.pitch;
     buf->size = creq.size;
     buf->handle = creq.handle;
+
+    printf("Creating framebuffer: %dx%d, size: %llu\n", creq.width, creq.height, creq.size);
 
     struct drm_mode_fb_cmd fbcmd;
     memset(&fbcmd, 0, sizeof(fbcmd));
@@ -239,6 +240,22 @@ bool mydrm_create_framebuffer(int fd, struct mydrm_buf* buf)
     return true;
 }
 
+void mydrm_free_res(struct drm_mode_card_res* res)
+{
+    free((void*)res->fb_id_ptr);
+    free((void*)res->crtc_id_ptr);
+    free((void*)res->connector_id_ptr);
+    free((void*)res->encoder_id_ptr);
+}
+
+void mydrm_free_connector(struct drm_mode_get_connector* conn)
+{
+    free((void*)conn->props_ptr);
+    free((void*)conn->prop_values_ptr);
+    free((void*)conn->modes_ptr);
+    free((void*)conn->encoders_ptr);
+}
+
 int mydrm_set_cursor(int fd, uint32_t crtc_id, uint32_t bo_handle, uint32_t width, uint32_t height)
 {
     struct drm_mode_cursor arg;
@@ -266,15 +283,15 @@ int mydrm_move_cursor(int fd, uint32_t crtc_id, int x, int y)
     return mydrm_ioctl(fd, DRM_IOCTL_MODE_CURSOR, &arg);
 }
 
-void* load_image(const char* path)
+size_t load_image(const char* path, void** data)
 {
-    void* data = NULL;
+    size_t size = 0;
     int fd = open(path, O_RDONLY);
 
     if (fd == -1)
     {
         perror("open");
-        return NULL;
+        return 0;
     }
     
     struct stat stat;
@@ -282,28 +299,30 @@ void* load_image(const char* path)
     {
         perror("fstat");
         close(fd);
-        return NULL;
+        return 0;
     }
+    size = stat.st_size;
 
-    data = malloc(stat.st_size);
-    memset(data, 0, stat.st_size);
+    *data = malloc(size);
+    memset(*data, 0, size);
 
-    if (read(fd, data, stat.st_size) == -1)
+    if (read(fd, *data, size) == -1)
     {
         perror("read");
         close(fd);
-        return NULL;
+        return 0;
     }
 
     close(fd);
 
-    return data;
+    return size;
 }
 
 int mydrm_setup_hardware_cursor(struct mydrm_data* data)
 {
     struct mydrm_buf* hw_cursor = &data->hw_cursor;
     int ret;
+    void* image_data = NULL;
 
     hw_cursor->width = cursor_size;
     hw_cursor->height = cursor_size;
@@ -315,17 +334,13 @@ int mydrm_setup_hardware_cursor(struct mydrm_data* data)
         return -1;
     }
 
-    void* image_data = load_image("cursor.data");
+    size_t size = load_image("cursor.data", &image_data);
 
     if (image_data)
-    {
-        memcpy(hw_cursor->map, image_data, hw_cursor->size);
-        free(image_data);
-    }
+        memcpy(hw_cursor->map, image_data, size);
     else
-    {
         memset(hw_cursor->map, 0xFF, hw_cursor->size);
-    }
+    free(image_data);
 
     ret = mydrm_set_cursor(data->fd, data->crt_id, hw_cursor->handle, cursor_size, cursor_size);
 

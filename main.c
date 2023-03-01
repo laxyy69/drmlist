@@ -111,6 +111,7 @@ static void draw_box(uint32_t* pixels, struct mydrm_data* data, uint32_t color)
     }
 }
 
+// Software cursor
 void draw_cursor(uint32_t* p, struct mydrm_buf* buf, struct mydrm_data* data)
 {
     int start_x = mouse_pos.x;
@@ -296,7 +297,7 @@ encoder_found:
 
     memset(&crtc, 0, sizeof(crtc));
     crtc.crtc_id = enc.crtc_id;
-    memcpy(&crtc.mode, mode, sizeof(*mode));
+    memcpy(&crtc.mode, mode, sizeof(struct drm_mode_modeinfo));
     crtc.x = 0;
     crtc.y = 0;
     crtc.fb_id = data->framebuffer[0].fb;
@@ -425,11 +426,13 @@ unmap_fb:
         perror("munmap framebuffer[0]");
     if (munmap(data->framebuffer[1].map, data->framebuffer[1].size) == -1)
         perror("munmap framebuffer[1]");
+    if (munmap(data->hw_cursor.map, data->hw_cursor.size) == -1)
+        perror("munmap hw_cursor");
 
 drop_master:
-    if (mouse_fd && (close(mouse_fd) == -1))
+    if (close(mouse_fd) == -1)
         perror("close mouse_fd");
-    if (epfd && (close(epfd) == -1))
+    if (close(epfd) == -1)
         perror("close epfd");
 
     printf("DONE!!!\n");
@@ -470,7 +473,6 @@ void print_drm_info(int fd)
     free(version->date);
     free(version);
 }
-
 
 int main(int argc, const char** argv)
 {
@@ -565,17 +567,20 @@ int main(int argc, const char** argv)
             {
                 printf(">> Attemping to set res: %dx%d on %s\n", hres, vres, conn_type);
                 ret = set_mode(&data, &conn, &modes[m], &res);
+                mydrm_free_connector(&conn);
                 goto drop_master;
             }
         }
 
     free_mem:
-        free((void*)conn.props_ptr);
+        mydrm_free_connector(&conn);
     }
 
 drop_master:
     if (is_master && ioctl(fd, DRM_IOCTL_DROP_MASTER, 0) == -1)
         perror("ioctl drop master");
+    
+    mydrm_free_res(&res);
     
     if (close(fd) == -1)
         perror("close");
