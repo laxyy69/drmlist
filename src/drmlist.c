@@ -4,6 +4,7 @@
 
 static int hres = -1;
 static int vres = -1;
+static int hrz = -1;
 
 static const char* drm_path = NULL;
 static const char* connector_str = NULL;
@@ -58,6 +59,7 @@ int drmlist_init(int argc, const char** argv)
     int ret;
     char* cursor_size_str;
     char* no_hw_cursor_str;
+    char mode_str[64];
 
     drm_path = getenv(ENV_DRMLIST_DRM_PATH);
     if (!drm_path)
@@ -79,11 +81,32 @@ int drmlist_init(int argc, const char** argv)
 
     print_drm_info(fd);
 
-    if (argc == 4)
+    if (argc == 3)
     {
-            connector_str = argv[1];
-        hres = atoi(argv[2]);
-        vres = atoi(argv[3]);
+        connector_str = argv[1];
+        strncpy(mode_str, argv[2], 64);
+        //hres = atoi(argv[2]);
+        //vres = atoi(argv[3]);
+        //
+        char* token = strtok(mode_str, "x");
+        if (!token)
+        {
+            printf("Invalid mode: '%s'\n", mode_str);
+            return -1;
+        }
+        hres = atoi(token);
+
+        token = strtok(NULL, "@");
+        if (token == NULL)
+        {
+            printf("Invalid mode: '%s'\n", mode_str);
+            return -1;
+        }
+        vres = atoi(token);
+        if ((token = strtok(NULL, "Hz")) != NULL)
+            hrz = atoi(token);
+
+        printf("Mode: %dx%d @ %dHz\n", hres, vres, hrz);
 
         if ((ret = mydrm_set_master(fd)) == -1)
             perror("Set Master");
@@ -160,7 +183,7 @@ static struct drm_mode_modeinfo* drmlist_print_modes_and_get(const char* conn_st
 
     for (size_t m = 0; m < conn->count_modes; m++)
     {
-        if (idx == -1 && conn_str && !strcmp(conn_str, conn_type) && hres == modes[m].hdisplay && vres == modes[m].vdisplay)
+        if (idx == -1 && conn_str && !strcmp(conn_str, conn_type) && hres == modes[m].hdisplay && vres == modes[m].vdisplay && (hrz == modes[m].vrefresh || hrz == -1))
         {
             printf("  >>>>");
             idx = m;
@@ -387,8 +410,6 @@ static int drmlist_init_mode(struct drm_mode_get_connector* conn, struct drm_mod
         return ret;
 
     return ret;
-
-set_mode_error:;
 }
 
 static int drmlist_init_epoll(int* epfd, struct epoll_event* event)
@@ -516,16 +537,23 @@ static void drmlist_draw_data(int fd, mydrm_data_t* data)
 {
     mydrm_fb_t* fb = &data->framebuffer[data->front_buf ^ 1];
     uint32_t* pixels = (uint32_t*)fb->pixels;
+    uint32_t box_color = 0xFFFF0000;
 
     /* Make all pixels backgroud color */
     memset(pixels, data->bg_color, fb->size) ;
 
     /* Update box */
-    drmlist_draw_box_asm(pixels, data, 0xFFFF0000);
+    if (data->mouse->left_down)
+        box_color |= 0x000000FF;
+    if (data->mouse->right_down)
+        box_color |= 0x0000FF00;
+
+    drmlist_draw_box_asm(pixels, data, box_color);
     
     /* Update cursor */
     data->mouse->move_cursor_callback(data, fb);
 
+    /* Flip buffers */
     drmlist_flip_page(data, fb);
 }
 
@@ -615,6 +643,7 @@ static int drmlist_mainloop(mydrm_data_t* data)
 int drmlist_run(void)
 {
     int ret;
+    bool did_set_mode = false;
 
     printf("DRM Connectors: %d\n", res->count_connectors);
 
@@ -636,12 +665,22 @@ int drmlist_run(void)
             ret = drmlist_init_mode(&conn, mode);
             if (ret == 0) 
                 ret = drmlist_mainloop(data);
+            did_set_mode = true;
 
             mydrm_free_connector(&conn);
             break;
         }
 
         mydrm_free_connector(&conn);
+    }
+
+    if (!did_set_mode && (hres != -1 && vres != 1))
+    {
+        if (hrz != -1)
+            printf("No such mode: %dx%d @ %dHz!\n", hres, vres, hrz);
+        else
+            printf("No such mode: %dx%d!\n", hres, vres);
+        ret = -1;
     }
 
     return ret;
